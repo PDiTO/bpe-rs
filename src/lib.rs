@@ -1,6 +1,7 @@
 //! Byte-level BPE tokenizer compatible with tiktoken rank files.
 
 mod error;
+pub mod merge;
 pub mod rank_file;
 
 pub use error::{Error, Result};
