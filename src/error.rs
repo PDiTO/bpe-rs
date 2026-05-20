@@ -21,7 +21,7 @@ pub enum Error {
     #[error("rank {0} is reserved and cannot be used")]
     ReservedRank(Rank),
 
-    #[error("special token {0:?} is empty or also appears as an ordinary token")]
+    #[error("special token {0:?} is empty or listed more than once")]
     InvalidSpecialToken(String),
 
     #[error("unknown token id {0}")]
