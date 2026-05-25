@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use aho_corasick::{AhoCorasick, MatchKind};
 use fancy_regex::Regex;
@@ -47,11 +48,11 @@ impl SpecialTokens<'_> {
 ///    merged byte pair by byte pair ([`crate::merge`]).
 ///
 /// `Encoding` is `Send + Sync`. The batch methods share one instance across threads.
-#[derive(Clone)]
 pub struct Encoding {
     name: String,
     pattern: String,
-    regex: Regex,
+    /// Per-thread copies of the split regex, compiled on first use. See [`Encoding::regex`].
+    regexes: Box<[OnceLock<Regex>]>,
     encoder: Ranks,
     decoder: FxHashMap<Rank, Box<[u8]>>,
     /// Sorted by rank. The index is also the pattern id in `special_matcher`.
@@ -69,6 +70,9 @@ impl fmt::Debug for Encoding {
             .finish()
     }
 }
+
+/// How many copies of the split regex each encoding keeps. See [`Encoding::regex`].
+const REGEX_COPIES: usize = 64;
 
 pub(crate) fn compile_pattern(pattern: &str) -> Result<Regex> {
     Regex::new(pattern).map_err(|e| Error::Pattern(Box::new(e)))
@@ -138,10 +142,15 @@ impl Encoding {
             .build(specials.iter().map(|(t, _)| t))
             .expect("a handful of literal special tokens always fits in an automaton");
 
+        // Keep the copy compiled for validation as the first slot; the rest are
+        // compiled lazily by whichever threads end up using them.
+        let regexes: Box<[OnceLock<Regex>]> = (0..REGEX_COPIES).map(|_| OnceLock::new()).collect();
+        let _ = regexes[0].set(regex);
+
         Ok(Self {
             name: name.into(),
             pattern: pattern.to_owned(),
-            regex,
+            regexes,
             encoder: ranks,
             decoder,
             special_tokens: specials,
@@ -171,6 +180,25 @@ impl Encoding {
     /// Builds one of the published encodings from a rank file on disk.
     pub fn from_preset_file(preset: &Preset, path: impl AsRef<Path>) -> Result<Self> {
         Self::from_preset(preset, rank_file::load(path)?)
+    }
+
+    /// The split regex for the current thread.
+    ///
+    /// Matching needs scratch space, which the regex engine keeps in a pool inside each
+    /// compiled regex. With a dozen threads sharing one regex, that pool becomes a point
+    /// of contention and batch encoding stops scaling. tiktoken hands each thread a
+    /// clone for the same reason, but with fancy-regex 0.19 clones still share the
+    /// inner delegate regexes (and their pools), so here each slot compiles its own copy
+    /// the first time a thread lands on it.
+    fn regex(&self) -> &Regex {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT_SLOT: AtomicUsize = AtomicUsize::new(0);
+        thread_local! {
+            static SLOT: usize = NEXT_SLOT.fetch_add(1, Ordering::Relaxed);
+        }
+        let slot = SLOT.with(|&slot| slot) % self.regexes.len();
+        self.regexes[slot]
+            .get_or_init(|| compile_pattern(&self.pattern).expect("pattern compiled once already"))
     }
 
     pub fn name(&self) -> &str {
@@ -213,7 +241,7 @@ impl Encoding {
     /// Splits text the way the encoder does before merging. Useful for seeing why a
     /// string tokenizes the way it does.
     pub fn split<'t>(&self, text: &'t str) -> Vec<&'t str> {
-        pieces(&self.regex, text).collect()
+        pieces(self.regex(), text).collect()
     }
 
     /// Encodes text, treating any special-token text as ordinary text.
@@ -224,7 +252,7 @@ impl Encoding {
     }
 
     fn encode_ordinary_into(&self, text: &str, out: &mut Vec<Rank>) {
-        for piece in pieces(&self.regex, text) {
+        for piece in pieces(self.regex(), text) {
             let bytes = piece.as_bytes();
             match self.encoder.get(bytes) {
                 Some(&rank) => out.push(rank),
