@@ -48,3 +48,18 @@ fetch cl100k_base.tiktoken "$base/cl100k_base.tiktoken" \
   223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7
 fetch o200k_base.tiktoken "$base/o200k_base.tiktoken" \
   446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d
+
+# Benchmark text: Pride and Prejudice from Project Gutenberg. Gutenberg occasionally
+# edits its headers, so this one is not hash-checked; the benchmarks only need
+# realistic English prose.
+corpus="$cache/corpus/pride_and_prejudice.txt"
+if [[ -f "$corpus" ]]; then
+  echo "ok       $corpus"
+else
+  mkdir -p "$cache/corpus"
+  echo "fetching Pride and Prejudice (benchmark corpus)"
+  curl --fail --silent --show-error --location --retry 3 -o "$corpus.part" \
+    https://www.gutenberg.org/cache/epub/1342/pg1342.txt
+  mv "$corpus.part" "$corpus"
+  echo "saved    $corpus"
+fi
