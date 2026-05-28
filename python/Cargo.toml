@@ -1,0 +1,17 @@
+[package]
+name = "bpe-rs-python"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Python bindings for bpe-rs"
+license = "MIT"
+publish = false
+
+[lib]
+name = "_bpe_rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+bpe-rs = { path = "..", default-features = false }
+pyo3 = { version = "=0.28.3", features = ["abi3-py310", "extension-module"] }
+rayon = "=1.12.0"

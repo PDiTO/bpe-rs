@@ -1,0 +1,58 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "bpe-rs"
+version = "0.1.0"
+description = "Byte-level BPE tokenizer in Rust, compatible with tiktoken rank files, with training"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "Paul Davis" }]
+keywords = ["tokenizer", "bpe", "tiktoken", "rust"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Text Processing",
+    "Typing :: Typed",
+]
+
+[dependency-groups]
+dev = [
+    "maturin>=1.9,<2",
+    "pytest>=8",
+    "ruff>=0.6",
+    "tiktoken>=0.9",
+]
+
+[tool.maturin]
+manifest-path = "python/Cargo.toml"
+python-source = "python"
+module-name = "bpe_rs._bpe_rs"
+
+[tool.uv]
+# Keep dependency resolution within the original development period.
+exclude-newer = "2026-05-18T00:00:00Z"
+# The extension is built and installed with `uv run maturin develop --uv`, so uv only
+# manages the dev dependencies here.
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["bpe_rs"]
+
+[tool.ruff.lint.per-file-ignores]
+# The test corpus is deliberately full of look-alike characters.
+"python/tests/corpus.py" = ["RUF001", "SIM905"]

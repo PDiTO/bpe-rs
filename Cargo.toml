@@ -10,6 +10,13 @@ authors = ["Paul Davis"]
 keywords = ["tokenizer", "bpe", "tiktoken", "nlp"]
 categories = ["text-processing", "encoding"]
 
+[workspace]
+members = [".", "python"]
+# The Python extension module only builds properly through maturin, so plain
+# `cargo test` / `cargo build` stick to the core crate. Clippy covers both with
+# `--workspace`.
+default-members = ["."]
+
 [lib]
 name = "bpe_rs"
 
