@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      # Covers the Python binding crate too. PyO3 only needs a python3 on PATH to
+      # type-check, which ubuntu-latest has.
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # The known-answer and property tests use the real vocabularies when present.
+      - name: fetch rank files
+        run: scripts/fetch_data.sh
+
+      - name: test
+        run: cargo test
+
+  python:
+    name: Python (wheel, ruff, pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v6
+
+      - name: install dev dependencies
+        run: uv sync --locked
+
+      - name: ruff
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: build wheel
+        run: uv run maturin build --release --out dist
+
+      - name: install extension
+        run: uv run maturin develop --uv --release
+
+      # Fail rather than skip if tiktoken or the rank files can't be fetched.
+      - name: pytest
+        run: uv run pytest
+        env:
+          BPE_RS_REQUIRE_DIFFERENTIAL: "1"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel
+          path: dist/*.whl
