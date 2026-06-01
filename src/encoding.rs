@@ -1,5 +1,6 @@
 //! The [`Encoding`] type: pre-tokenization, special tokens, encoding and decoding.
 
+use std::cmp::Reverse;
 use std::fmt;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -22,7 +23,9 @@ pub enum SpecialTokens<'a> {
     None,
     /// Every special token the encoding defines.
     All,
-    /// Just these. Names the encoding does not define are ignored.
+    /// Just these strings. As in tiktoken, an allowed string that is not one of the
+    /// encoding's special tokens has no effect, while a disallowed string is an error
+    /// wherever it appears, special token or not.
     Only(&'a [&'a str]),
 }
 
@@ -55,9 +58,41 @@ pub struct Encoding {
     regexes: Box<[OnceLock<Regex>]>,
     encoder: Ranks,
     decoder: FxHashMap<Rank, Box<[u8]>>,
-    /// Sorted by rank. The index is also the pattern id in `special_matcher`.
+    /// Sorted by rank.
     special_tokens: Vec<(String, Rank)>,
-    special_matcher: AhoCorasick,
+    /// Finds any special token. `None` if there are none.
+    all_specials: Option<SpecialMatcher>,
+    max_token_value: Rank,
+}
+
+/// Finds special tokens in text: the leftmost match, and the longest one if several
+/// start at the same place.
+struct SpecialMatcher {
+    automaton: AhoCorasick,
+    /// Token id for each automaton pattern.
+    ranks: Vec<Rank>,
+}
+
+impl SpecialMatcher {
+    fn new<'a>(tokens: impl IntoIterator<Item = &'a (String, Rank)>) -> Option<Self> {
+        let (patterns, ranks): (Vec<&str>, Vec<Rank>) =
+            tokens.into_iter().map(|(t, r)| (t.as_str(), *r)).unzip();
+        if patterns.is_empty() {
+            return None;
+        }
+        let automaton = AhoCorasick::builder()
+            .match_kind(MatchKind::LeftmostLongest)
+            .build(patterns)
+            .expect("a handful of literal special tokens always fits in an automaton");
+        Some(Self { automaton, ranks })
+    }
+
+    /// `(start, end, rank)` of the first special token at or after byte `from`.
+    fn find(&self, text: &str, from: usize) -> Option<(usize, usize, Rank)> {
+        let input = aho_corasick::Input::new(text).span(from..text.len());
+        let m = self.automaton.find(input)?;
+        Some((m.start(), m.end(), self.ranks[m.pattern().as_usize()]))
+    }
 }
 
 impl fmt::Debug for Encoding {
@@ -67,12 +102,17 @@ impl fmt::Debug for Encoding {
             .field("pattern", &self.pattern)
             .field("mergeable_tokens", &self.encoder.len())
             .field("special_tokens", &self.special_tokens)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
-/// How many copies of the split regex each encoding keeps. See [`Encoding::regex`].
-const REGEX_COPIES: usize = 64;
+/// How many copies of the split regex each encoding can hold. See [`Encoding::regex`].
+/// Each compiled copy of the cl100k or o200k pattern costs somewhere around a megabyte
+/// once it has been used, so this is kept to a small multiple of the core count.
+fn regex_slots() -> usize {
+    let cores = std::thread::available_parallelism().map_or(8, |n| n.get());
+    (2 * cores).clamp(2, 64)
+}
 
 pub(crate) fn compile_pattern(pattern: &str) -> Result<Regex> {
     Regex::new(pattern).map_err(|e| Error::Pattern(Box::new(e)))
@@ -150,14 +190,12 @@ impl Encoding {
             }
         }
 
-        let special_matcher = AhoCorasick::builder()
-            .match_kind(MatchKind::LeftmostLongest)
-            .build(specials.iter().map(|(t, _)| t))
-            .expect("a handful of literal special tokens always fits in an automaton");
+        let all_specials = SpecialMatcher::new(&specials);
+        let max_token_value = decoder.keys().copied().max().unwrap_or(0);
 
         // Keep the copy compiled for validation as the first slot; the rest are
         // compiled lazily by whichever threads end up using them.
-        let regexes: Box<[OnceLock<Regex>]> = (0..REGEX_COPIES).map(|_| OnceLock::new()).collect();
+        let regexes: Box<[OnceLock<Regex>]> = (0..regex_slots()).map(|_| OnceLock::new()).collect();
         let _ = regexes[0].set(regex);
 
         Ok(Self {
@@ -167,7 +205,8 @@ impl Encoding {
             encoder: ranks,
             decoder,
             special_tokens: specials,
-            special_matcher,
+            all_specials,
+            max_token_value,
         })
     }
 
@@ -243,7 +282,7 @@ impl Encoding {
 
     /// The largest token id, special tokens included.
     pub fn max_token_value(&self) -> Rank {
-        self.decoder.keys().copied().max().unwrap_or(0)
+        self.max_token_value
     }
 
     /// `max_token_value() + 1`, which is what tiktoken reports as `n_vocab`.
@@ -295,16 +334,7 @@ impl Encoding {
         allowed: SpecialTokens<'_>,
         disallowed: SpecialTokens<'_>,
     ) -> Result<Vec<Rank>> {
-        if disallowed != SpecialTokens::None {
-            let is_disallowed = |token: &str| match disallowed {
-                SpecialTokens::All => !allowed.contains(token),
-                other => other.contains(token),
-            };
-            if let Some((_, _, index)) = self.find_special(text, 0, is_disallowed) {
-                let token = self.special_tokens[index].0.clone();
-                return Err(Error::DisallowedSpecialToken(token));
-            }
-        }
+        self.check_disallowed(text, allowed, disallowed)?;
         self.encode_allowing(text, allowed)
     }
 
@@ -313,45 +343,72 @@ impl Encoding {
         self.encode_allowing(text, SpecialTokens::All)
     }
 
-    fn encode_allowing(&self, text: &str, allowed: SpecialTokens<'_>) -> Result<Vec<Rank>> {
-        if allowed == SpecialTokens::None || self.special_tokens.is_empty() {
-            return self.encode_ordinary(text);
+    /// Fails with the leftmost disallowed string in `text`, if there is one.
+    fn check_disallowed(
+        &self,
+        text: &str,
+        allowed: SpecialTokens<'_>,
+        disallowed: SpecialTokens<'_>,
+    ) -> Result<()> {
+        let leftmost = |candidates: &mut dyn Iterator<Item = &str>| {
+            candidates
+                .filter_map(|t| {
+                    text.find(t)
+                        .map(|pos| (pos, Reverse(t.len()), t.to_owned()))
+                })
+                .min()
+        };
+        let hit = match disallowed {
+            SpecialTokens::None => None,
+            SpecialTokens::All => leftmost(
+                &mut self
+                    .special_tokens
+                    .iter()
+                    .map(|(t, _)| t.as_str())
+                    .filter(|t| !allowed.contains(t)),
+            ),
+            SpecialTokens::Only(strings) => leftmost(&mut strings.iter().copied()),
+        };
+        match hit {
+            Some((_, _, token)) => Err(Error::DisallowedSpecialToken(token)),
+            None => Ok(()),
         }
+    }
+
+    fn encode_allowing(&self, text: &str, allowed: SpecialTokens<'_>) -> Result<Vec<Rank>> {
+        // Search only for the allowed tokens, so that an allowed token is found even if a
+        // longer, not-allowed one starts at the same place.
+        let subset;
+        let matcher = match allowed {
+            SpecialTokens::None => None,
+            SpecialTokens::All => self.all_specials.as_ref(),
+            SpecialTokens::Only(list) => {
+                subset = SpecialMatcher::new(
+                    self.special_tokens
+                        .iter()
+                        .filter(|(t, _)| list.contains(&t.as_str())),
+                );
+                subset.as_ref()
+            }
+        };
+        let Some(matcher) = matcher else {
+            return self.encode_ordinary(text);
+        };
+
         let mut out = Vec::with_capacity(text.len() / 4 + 1);
         let mut start = 0;
         loop {
-            let found = self.find_special(text, start, |t| allowed.contains(t));
+            let found = matcher.find(text, start);
             let end = found.map_or(text.len(), |(s, _, _)| s);
             self.encode_ordinary_into(&text[start..end], start, &mut out)?;
             match found {
-                Some((_, special_end, index)) => {
-                    out.push(self.special_tokens[index].1);
+                Some((_, special_end, rank)) => {
+                    out.push(rank);
                     start = special_end;
                 }
                 None => return Ok(out),
             }
         }
-    }
-
-    /// Finds the leftmost special token at or after byte `from` for which `wanted`
-    /// returns true. Returns `(start, end, index into special_tokens)`.
-    fn find_special(
-        &self,
-        text: &str,
-        mut from: usize,
-        wanted: impl Fn(&str) -> bool,
-    ) -> Option<(usize, usize, usize)> {
-        while from < text.len() {
-            let input = aho_corasick::Input::new(text).span(from..text.len());
-            let m = self.special_matcher.find(input)?;
-            let index = m.pattern().as_usize();
-            if wanted(&self.special_tokens[index].0) {
-                return Some((m.start(), m.end(), index));
-            }
-            // Keep looking, including for a wanted token overlapping this one.
-            from = m.start() + 1;
-        }
-        None
     }
 
     /// Encodes many texts in parallel on the rayon thread pool.
@@ -505,6 +562,38 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn overlapping_special_tokens_follow_tiktoken() {
+        let ranks: Ranks = (0..=255u8).map(|b| (vec![b], Rank::from(b))).collect();
+        let specials = [("<s>".to_owned(), 300), ("<s>x".to_owned(), 301)];
+        let enc = Encoding::new("x", SIMPLE_PATTERN, ranks, specials).unwrap();
+        let only_short = SpecialTokens::Only(&["<s>"]);
+        let only_long = SpecialTokens::Only(&["<s>x"]);
+
+        // The longer token is preferred when both are allowed...
+        assert_eq!(enc.encode_with_special_tokens("<s>x").unwrap(), [301]);
+        // ...but an allowed token is still found when a longer, unlisted one overlaps it.
+        let tokens = enc.encode("<s>x", only_short, SpecialTokens::None).unwrap();
+        assert_eq!(tokens, [300, u32::from(b'x')]);
+        // Disallowed text is found even inside a longer special token.
+        assert!(enc.encode("<s>x", SpecialTokens::None, only_short).is_err());
+        assert!(enc.encode("<s>x", only_long, SpecialTokens::All).is_err());
+    }
+
+    #[test]
+    fn any_disallowed_string_is_an_error() {
+        // tiktoken raises for every string in disallowed_special, special token or not.
+        let enc = tiny(&[]);
+        let err = enc
+            .encode(
+                "say hello",
+                SpecialTokens::None,
+                SpecialTokens::Only(&["hello"]),
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::DisallowedSpecialToken(ref t) if t == "hello"));
     }
 
     #[test]

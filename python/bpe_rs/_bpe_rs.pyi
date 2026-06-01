@@ -54,28 +54,33 @@ class Encoding:
         self,
         text: str,
         *,
-        allowed_special: Literal["all"] | Collection[str] = ...,
-        disallowed_special: Literal["all"] | Collection[str] = "all",
+        allowed_special: Literal["all"] | Collection[str] | None = ...,
+        disallowed_special: Literal["all"] | Collection[str] | None = "all",
     ) -> list[int]:
         """Encodes text with tiktoken's special-token rules.
 
         By default any special-token text raises ``ValueError``. Tokens in
-        ``allowed_special`` are encoded as their special id; pass
-        ``disallowed_special=()`` to encode special-token text as plain text instead.
+        ``allowed_special`` are encoded as their special id. Pass
+        ``disallowed_special=()`` (or ``None``) to encode special-token text as plain text
+        instead. Any string listed in ``disallowed_special`` raises, special token or not.
         """
 
     def encode_ordinary_batch(
         self, texts: Sequence[str], *, num_threads: int | None = None
     ) -> list[list[int]]:
-        """Encodes many texts in parallel. ``num_threads=None`` uses every core."""
+        """Encodes many texts in parallel. ``num_threads=None`` uses every core.
+
+        A thread pool is created for each distinct ``num_threads`` value and kept for
+        the life of the process.
+        """
 
     def encode_batch(
         self,
         texts: Sequence[str],
         *,
         num_threads: int | None = None,
-        allowed_special: Literal["all"] | Collection[str] = ...,
-        disallowed_special: Literal["all"] | Collection[str] = "all",
+        allowed_special: Literal["all"] | Collection[str] | None = ...,
+        disallowed_special: Literal["all"] | Collection[str] | None = "all",
     ) -> list[list[int]]: ...
     def decode_bytes(self, tokens: Sequence[int]) -> bytes: ...
     def decode(self, tokens: Sequence[int], errors: str = "replace") -> str:

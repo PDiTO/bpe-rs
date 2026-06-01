@@ -3,8 +3,8 @@
 //! Given the bytes of one piece (say `" tokenizer"`), BPE starts with one symbol per byte
 //! and repeatedly merges the adjacent pair whose concatenation has the lowest rank in the
 //! vocabulary. When no adjacent pair is in the vocabulary any more, the remaining symbols
-//! are the tokens. Ties can only happen between overlapping occurrences of the same pair
-//! (same bytes means same rank), and they go to the leftmost one. That matches tiktoken.
+//! are the tokens. When several pairs share the lowest rank (they then spell the same
+//! bytes), the leftmost one is merged first. That matches tiktoken.
 //!
 //! Two implementations live here and produce identical output:
 //!

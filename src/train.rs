@@ -215,8 +215,9 @@ fn learn(mut words: Vec<Word>, vocab_size: usize, min_frequency: i64) -> Ranks {
         }
 
         let bytes = [vocab[pair.0 as usize].as_slice(), &vocab[pair.1 as usize]].concat();
-        // Two different pairs can spell the same bytes ("a"+"bc" and "ab"+"c"). A rank
-        // file maps bytes to ranks, so they share one id rather than getting two.
+        // If two different pairs ever spell the same bytes ("a"+"bc" and "ab"+"c"), they
+        // must share one id, because a rank file maps bytes to ranks. I haven't managed
+        // to trigger this on real or random corpora, but nothing here relies on that.
         let new_id = *ids.entry(bytes).or_insert_with_key(|bytes| {
             vocab.push(bytes.clone());
             (vocab.len() - 1) as u32
@@ -377,9 +378,8 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_byte_strings_share_an_id() {
-        // Force ("a","bc") and ("ab","c") style collisions: the ranks must stay a
-        // bijection between byte strings and ids.
+    fn ranks_are_dense_and_unique() {
+        // Every id from 0 to len - 1 is used exactly once.
         let docs = ["abc abc abc ab ab bc bc bc bc a"];
         let ranks = Trainer::new(300)
             .pattern(r"[\s\S]+")

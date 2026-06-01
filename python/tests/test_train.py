@@ -76,8 +76,9 @@ def test_save_and_reload(tmp_path: Path) -> None:
 
 def test_min_frequency_stops_early() -> None:
     enc = bpe_rs.train(["abc abd"], 10_000, min_frequency=2)
-    # Only " a"/"ab"-style pairs that occur twice can be learned.
-    assert enc.n_vocab < 262
+    # "ab" is the only pair that occurs twice, so it is the only merge.
+    assert enc.n_vocab == 257
+    assert enc.decode_single_token_bytes(256) == b"ab"
 
 
 def test_bad_arguments() -> None:

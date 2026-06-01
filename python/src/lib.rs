@@ -44,15 +44,25 @@ fn text_of<'a>(s: &'a Bound<'_, PyString>) -> PyResult<Cow<'a, str>> {
     }
 }
 
-/// tiktoken's `allowed_special` / `disallowed_special` arguments: the string `"all"` or
-/// a collection of token strings.
+/// tiktoken's `allowed_special` / `disallowed_special` arguments: the string `"all"`,
+/// a collection of strings, or `None` (treated as empty, which for
+/// `disallowed_special` turns the check off, as it does in tiktoken).
 enum SpecialArg {
     All,
     Only(Vec<String>),
 }
 
 impl SpecialArg {
-    fn parse(obj: &Bound<'_, PyAny>) -> PyResult<Self> {
+    const NONE: SpecialArg = SpecialArg::Only(Vec::new());
+}
+
+impl<'a, 'py> FromPyObject<'a, 'py> for SpecialArg {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        if obj.is_none() {
+            return Ok(SpecialArg::NONE);
+        }
         if let Ok(s) = obj.cast::<PyString>() {
             return match s.to_str()? {
                 "all" => Ok(SpecialArg::All),
@@ -67,7 +77,9 @@ impl SpecialArg {
             .collect::<PyResult<Vec<_>>>()?;
         Ok(SpecialArg::Only(tokens))
     }
+}
 
+impl SpecialArg {
     fn with_borrowed<R>(&self, f: impl FnOnce(SpecialTokens<'_>) -> R) -> R {
         match self {
             SpecialArg::All => f(SpecialTokens::All),
@@ -81,7 +93,8 @@ impl SpecialArg {
 }
 
 /// Rayon pools keyed by thread count, built on first use and kept for the life of
-/// the process. `num_threads=None` uses rayon's global pool.
+/// the process, so each distinct `num_threads` value a program uses costs one pool of
+/// that many threads. `num_threads=None` uses rayon's global pool.
 fn pool(num_threads: usize) -> PyResult<Arc<ThreadPool>> {
     static POOLS: OnceLock<Mutex<HashMap<usize, Arc<ThreadPool>>>> = OnceLock::new();
     let mut pools = POOLS
@@ -195,15 +208,15 @@ impl PyEncoding {
             .map_err(to_py_err)
     }
 
-    #[pyo3(signature = (text, *, allowed_special = None, disallowed_special = None))]
+    #[pyo3(signature = (text, *, allowed_special = SpecialArg::NONE, disallowed_special = SpecialArg::All))]
     fn encode(
         &self,
         py: Python<'_>,
         text: &Bound<'_, PyString>,
-        allowed_special: Option<&Bound<'_, PyAny>>,
-        disallowed_special: Option<&Bound<'_, PyAny>>,
+        allowed_special: SpecialArg,
+        disallowed_special: SpecialArg,
     ) -> PyResult<Vec<Rank>> {
-        let (allowed, disallowed) = parse_special_args(allowed_special, disallowed_special)?;
+        let (allowed, disallowed) = (allowed_special, disallowed_special);
         let text = text_of(text)?;
         py.detach(|| {
             allowed.with_borrowed(|allowed| {
@@ -225,16 +238,19 @@ impl PyEncoding {
             .map_err(to_py_err)
     }
 
-    #[pyo3(signature = (texts, *, num_threads = None, allowed_special = None, disallowed_special = None))]
+    #[pyo3(signature = (
+        texts, *, num_threads = None, allowed_special = SpecialArg::NONE,
+        disallowed_special = SpecialArg::All
+    ))]
     fn encode_batch(
         &self,
         py: Python<'_>,
         texts: Vec<Bound<'_, PyString>>,
         num_threads: Option<usize>,
-        allowed_special: Option<&Bound<'_, PyAny>>,
-        disallowed_special: Option<&Bound<'_, PyAny>>,
+        allowed_special: SpecialArg,
+        disallowed_special: SpecialArg,
     ) -> PyResult<Vec<Vec<Rank>>> {
-        let (allowed, disallowed) = parse_special_args(allowed_special, disallowed_special)?;
+        let (allowed, disallowed) = (allowed_special, disallowed_special);
         let texts = texts.iter().map(text_of).collect::<PyResult<Vec<_>>>()?;
         py.detach(|| {
             run_on(num_threads, || {
@@ -309,21 +325,6 @@ impl PyEncoding {
     fn __repr__(&self) -> String {
         format!("<Encoding {:?}>", self.inner.name())
     }
-}
-
-fn parse_special_args(
-    allowed: Option<&Bound<'_, PyAny>>,
-    disallowed: Option<&Bound<'_, PyAny>>,
-) -> PyResult<(SpecialArg, SpecialArg)> {
-    let allowed = match allowed {
-        Some(obj) => SpecialArg::parse(obj)?,
-        None => SpecialArg::Only(Vec::new()),
-    };
-    let disallowed = match disallowed {
-        Some(obj) => SpecialArg::parse(obj)?,
-        None => SpecialArg::All,
-    };
-    Ok((allowed, disallowed))
 }
 
 /// Learns a BPE vocabulary from `texts` and returns it as an `Encoding`.

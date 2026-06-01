@@ -68,6 +68,9 @@ def test_special_tokens(pair: Pair, text: str) -> None:
         text, allowed_special=only_eot, disallowed_special=()
     )
     assert ours.encode(text, disallowed_special=()) == theirs.encode(text, disallowed_special=())
+    assert ours.encode(text, disallowed_special=None) == theirs.encode(
+        text, disallowed_special=None
+    )
 
     # Default arguments: any special-token text is an error, in both libraries.
     def outcome(enc) -> list[int] | type[Exception]:
@@ -77,6 +80,19 @@ def test_special_tokens(pair: Pair, text: str) -> None:
             return ValueError
 
     assert outcome(ours) == outcome(theirs)
+
+
+@pytest.mark.parametrize("disallowed", [{"hello"}, ["wor", "zzz"], {"<|endoftext|>"}])
+def test_disallowing_arbitrary_strings(pair: Pair, disallowed: set[str] | list[str]) -> None:
+    # tiktoken raises for any disallowed string, not only for real special tokens.
+    for text in ["hello world", "say hello", "nothing to see", "<|endoftext|>"]:
+        outcomes = []
+        for enc in (pair.ours, pair.theirs):
+            try:
+                outcomes.append(enc.encode(text, disallowed_special=disallowed))
+            except ValueError:
+                outcomes.append("ValueError")
+        assert outcomes[0] == outcomes[1], text
 
 
 def test_special_token_batches(pair: Pair) -> None:
