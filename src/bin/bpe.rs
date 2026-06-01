@@ -275,7 +275,7 @@ fn bench(
 ) -> Result<()> {
     let mb = text.len() as f64 / 1e6;
     let docs = split_docs(text, doc_bytes);
-    let tokens = enc.encode_ordinary(text);
+    let tokens = enc.encode_ordinary(text)?;
     writeln!(
         out,
         "{}: {:.2} MB, {} tokens ({:.2} bytes/token), {} docs, {} threads",
@@ -288,10 +288,10 @@ fn bench(
     )?;
 
     let single = time_it(budget, || {
-        std::hint::black_box(enc.encode_ordinary(text));
+        std::hint::black_box(enc.encode_ordinary(text).unwrap());
     });
     let batch = time_it(budget, || {
-        std::hint::black_box(enc.encode_ordinary_batch(&docs));
+        std::hint::black_box(enc.encode_ordinary_batch(&docs).unwrap());
     });
     let decode = time_it(budget, || {
         std::hint::black_box(enc.decode_bytes(&tokens).unwrap());

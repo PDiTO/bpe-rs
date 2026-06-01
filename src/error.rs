@@ -30,6 +30,14 @@ pub enum Error {
     #[error("text contains the disallowed special token {0:?}")]
     DisallowedSpecialToken(String),
 
+    /// The split regex gave up on the input. In practice this means a run of roughly a
+    /// million whitespace characters, which overflows fancy-regex's backtracking stack.
+    #[error("pre-tokenization failed at byte {offset}: {source}")]
+    PreTokenize {
+        offset: usize,
+        source: Box<fancy_regex::Error>,
+    },
+
     #[error("vocab_size must be at least 256, got {0}")]
     VocabSizeTooSmall(usize),
 }

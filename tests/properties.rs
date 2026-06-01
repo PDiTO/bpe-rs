@@ -108,7 +108,7 @@ fn naive_train(texts: &[String], vocab_size: usize, pattern: &str) -> Ranks {
     let splitter = Encoding::new("split", pattern, byte_ranks(), std::iter::empty()).unwrap();
     let mut counts: HashMap<&str, i64> = HashMap::new();
     for text in texts {
-        for piece in splitter.split(text) {
+        for piece in splitter.split(text).unwrap() {
             *counts.entry(piece).or_default() += 1;
         }
     }
@@ -172,7 +172,7 @@ proptest! {
     #[test]
     fn decode_inverts_encode(s in text()) {
         for enc in encodings() {
-            let tokens = enc.encode_ordinary(&s);
+            let tokens = enc.encode_ordinary(&s).unwrap();
             prop_assert_eq!(enc.decode(&tokens).unwrap(), s.as_str(), "{}", enc.name());
         }
     }
@@ -180,7 +180,7 @@ proptest! {
     #[test]
     fn decode_inverts_encode_on_lossy_bytes(s in lossy_text()) {
         for enc in encodings() {
-            let tokens = enc.encode_ordinary(&s);
+            let tokens = enc.encode_ordinary(&s).unwrap();
             prop_assert_eq!(enc.decode_bytes(&tokens).unwrap(), s.as_bytes());
         }
     }
@@ -197,7 +197,7 @@ proptest! {
             }
         }
         for enc in encodings() {
-            let tokens = enc.encode_with_special_tokens(&s);
+            let tokens = enc.encode_with_special_tokens(&s).unwrap();
             let eot = enc.special_token("<|endoftext|>").unwrap();
             let expected = parts.iter().filter(|(_, special)| *special).count();
             prop_assert_eq!(tokens.iter().filter(|&&t| t == eot).count(), expected);
@@ -211,17 +211,17 @@ proptest! {
     #[test]
     fn encoding_is_deterministic_and_batch_agrees(texts in prop::collection::vec(text(), 0..20)) {
         for enc in encodings() {
-            let sequential: Vec<Vec<Rank>> = texts.iter().map(|t| enc.encode_ordinary(t)).collect();
-            let again: Vec<Vec<Rank>> = texts.iter().map(|t| enc.encode_ordinary(t)).collect();
+            let sequential: Vec<Vec<Rank>> = texts.iter().map(|t| enc.encode_ordinary(t).unwrap()).collect();
+            let again: Vec<Vec<Rank>> = texts.iter().map(|t| enc.encode_ordinary(t).unwrap()).collect();
             prop_assert_eq!(&sequential, &again);
-            prop_assert_eq!(&enc.encode_ordinary_batch(&texts), &sequential);
+            prop_assert_eq!(&enc.encode_ordinary_batch(&texts).unwrap(), &sequential);
         }
     }
 
     #[test]
     fn pieces_concatenate_to_the_input(s in text()) {
         for enc in encodings() {
-            prop_assert_eq!(enc.split(&s).concat(), s.as_str());
+            prop_assert_eq!(enc.split(&s).unwrap().concat(), s.as_str());
         }
     }
 
@@ -268,7 +268,7 @@ proptest! {
             .train("t", &docs)
             .unwrap();
         for s in docs.iter().chain([&probe]) {
-            prop_assert_eq!(enc.decode(&enc.encode_ordinary(s)).unwrap(), s.as_str());
+            prop_assert_eq!(enc.decode(&enc.encode_ordinary(s).unwrap()).unwrap(), s.as_str());
         }
 
         // Saving and reloading gives back the same vocabulary.

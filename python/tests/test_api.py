@@ -63,6 +63,12 @@ def test_decode_errors(cl100k: bpe_rs.Encoding) -> None:
         cl100k.decode([-1])
 
 
+def test_huge_whitespace_run_raises_instead_of_panicking(cl100k: bpe_rs.Encoding) -> None:
+    # fancy-regex can't split a run of ~1M spaces (tiktoken raises a PanicException).
+    with pytest.raises(ValueError, match="pre-tokenization failed at byte 5"):
+        cl100k.encode("hello" + " " * 1_100_000 + "x")
+
+
 def test_split_shows_the_pieces(cl100k: bpe_rs.Encoding) -> None:
     assert cl100k.split("I'm here  now") == ["I", "'m", " here", " ", " now"]
 

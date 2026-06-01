@@ -78,18 +78,31 @@ pub(crate) fn compile_pattern(pattern: &str) -> Result<Regex> {
     Regex::new(pattern).map_err(|e| Error::Pattern(Box::new(e)))
 }
 
-/// Splits `text` into pre-tokenization pieces.
+/// Splits `text` into pre-tokenization pieces. `base` is added to byte offsets in
+/// errors, for when `text` is a slice of something bigger.
 ///
-/// fancy-regex can fail at match time if a pattern exceeds its backtracking limit. The
-/// published patterns backtrack at most a character or two per match, so that is treated
-/// as a bug rather than something callers need to handle.
-pub(crate) fn pieces<'r, 't>(regex: &'r Regex, text: &'t str) -> impl Iterator<Item = &'t str> + 'r
+/// Matching can fail: fancy-regex caps its backtracking stack at a million entries, and
+/// `\s+(?!\S)` needs one entry per character of a whitespace run. So a run of about a
+/// million spaces can't be split. tiktoken panics on the same input; this returns an
+/// error instead.
+pub(crate) fn pieces<'r, 't>(
+    regex: &'r Regex,
+    text: &'t str,
+    base: usize,
+) -> impl Iterator<Item = Result<&'t str>> + 'r
 where
     't: 'r,
 {
-    regex.find_iter(text).map(|m| {
-        m.expect("pre-tokenization regex hit its backtracking limit")
-            .as_str()
+    let mut last_end = 0;
+    regex.find_iter(text).map(move |m| match m {
+        Ok(m) => {
+            last_end = m.end();
+            Ok(m.as_str())
+        }
+        Err(e) => Err(Error::PreTokenize {
+            offset: base + last_end,
+            source: Box::new(e),
+        }),
     })
 }
 
@@ -240,25 +253,30 @@ impl Encoding {
 
     /// Splits text the way the encoder does before merging. Useful for seeing why a
     /// string tokenizes the way it does.
-    pub fn split<'t>(&self, text: &'t str) -> Vec<&'t str> {
-        pieces(self.regex(), text).collect()
+    pub fn split<'t>(&self, text: &'t str) -> Result<Vec<&'t str>> {
+        pieces(self.regex(), text, 0).collect()
     }
 
     /// Encodes text, treating any special-token text as ordinary text.
-    pub fn encode_ordinary(&self, text: &str) -> Vec<Rank> {
+    ///
+    /// The only possible error is [`Error::PreTokenize`], for inputs the split regex
+    /// cannot handle (see [`Error::PreTokenize`]).
+    pub fn encode_ordinary(&self, text: &str) -> Result<Vec<Rank>> {
         let mut out = Vec::with_capacity(text.len() / 4 + 1);
-        self.encode_ordinary_into(text, &mut out);
-        out
+        self.encode_ordinary_into(text, 0, &mut out)?;
+        Ok(out)
     }
 
-    fn encode_ordinary_into(&self, text: &str, out: &mut Vec<Rank>) {
-        for piece in pieces(self.regex(), text) {
-            let bytes = piece.as_bytes();
+    /// Encodes `text` (which starts at byte `base` of the caller's input) onto `out`.
+    fn encode_ordinary_into(&self, text: &str, base: usize, out: &mut Vec<Rank>) -> Result<()> {
+        for piece in pieces(self.regex(), text, base) {
+            let bytes = piece?.as_bytes();
             match self.encoder.get(bytes) {
                 Some(&rank) => out.push(rank),
                 None => merge::encode_piece(&self.encoder, bytes, out),
             }
         }
+        Ok(())
     }
 
     /// Encodes text with tiktoken's special-token rules.
@@ -287,15 +305,15 @@ impl Encoding {
                 return Err(Error::DisallowedSpecialToken(token));
             }
         }
-        Ok(self.encode_allowing(text, allowed))
+        self.encode_allowing(text, allowed)
     }
 
     /// Encodes text, turning every special token it contains into its special id.
-    pub fn encode_with_special_tokens(&self, text: &str) -> Vec<Rank> {
+    pub fn encode_with_special_tokens(&self, text: &str) -> Result<Vec<Rank>> {
         self.encode_allowing(text, SpecialTokens::All)
     }
 
-    fn encode_allowing(&self, text: &str, allowed: SpecialTokens<'_>) -> Vec<Rank> {
+    fn encode_allowing(&self, text: &str, allowed: SpecialTokens<'_>) -> Result<Vec<Rank>> {
         if allowed == SpecialTokens::None || self.special_tokens.is_empty() {
             return self.encode_ordinary(text);
         }
@@ -304,13 +322,13 @@ impl Encoding {
         loop {
             let found = self.find_special(text, start, |t| allowed.contains(t));
             let end = found.map_or(text.len(), |(s, _, _)| s);
-            self.encode_ordinary_into(&text[start..end], &mut out);
+            self.encode_ordinary_into(&text[start..end], start, &mut out)?;
             match found {
                 Some((_, special_end, index)) => {
                     out.push(self.special_tokens[index].1);
                     start = special_end;
                 }
-                None => return out,
+                None => return Ok(out),
             }
         }
     }
@@ -337,7 +355,10 @@ impl Encoding {
     }
 
     /// Encodes many texts in parallel on the rayon thread pool.
-    pub fn encode_ordinary_batch<S: AsRef<str> + Sync>(&self, texts: &[S]) -> Vec<Vec<Rank>> {
+    pub fn encode_ordinary_batch<S: AsRef<str> + Sync>(
+        &self,
+        texts: &[S],
+    ) -> Result<Vec<Vec<Rank>>> {
         texts
             .par_iter()
             .map(|t| self.encode_ordinary(t.as_ref()))
@@ -415,7 +436,7 @@ mod tests {
     #[test]
     fn encodes_and_decodes() {
         let enc = tiny(&["he", "ll", "hell", "hello", " w", " wo"]);
-        let tokens = enc.encode_ordinary("hello world");
+        let tokens = enc.encode_ordinary("hello world").unwrap();
         assert_eq!(tokens[0], 259, "whole piece `hello` is a token");
         assert_eq!(enc.decode(&tokens).unwrap(), "hello world");
     }
@@ -423,7 +444,7 @@ mod tests {
     #[test]
     fn split_follows_the_pattern() {
         let enc = tiny(&[]);
-        assert_eq!(enc.split("a bb  c"), ["a", " bb", " ", " c"]);
+        assert_eq!(enc.split("a bb  c").unwrap(), ["a", " bb", " ", " c"]);
     }
 
     #[test]
@@ -447,7 +468,7 @@ mod tests {
             .unwrap();
         assert_eq!(tokens, [97, 1000, 98]);
         assert_eq!(
-            enc.encode_with_special_tokens("<|pad|><|end|>"),
+            enc.encode_with_special_tokens("<|pad|><|end|>").unwrap(),
             [1001, 1000]
         );
     }
@@ -462,7 +483,7 @@ mod tests {
         assert_eq!(*tokens.last().unwrap(), 1000);
         assert!(!tokens.contains(&1001));
         assert_eq!(enc.decode(&tokens).unwrap(), text);
-        assert_eq!(enc.encode_ordinary(text).len(), text.len());
+        assert_eq!(enc.encode_ordinary(text).unwrap().len(), text.len());
     }
 
     #[test]
@@ -489,7 +510,7 @@ mod tests {
     #[test]
     fn decoding_split_utf8_is_lossy() {
         let enc = tiny(&[]);
-        let tokens = enc.encode_ordinary("é");
+        let tokens = enc.encode_ordinary("é").unwrap();
         assert_eq!(tokens.len(), 2);
         assert_eq!(enc.decode_bytes(&tokens[..1]).unwrap(), [0xc3]);
         assert_eq!(enc.decode(&tokens[..1]).unwrap(), "\u{fffd}");
@@ -545,9 +566,9 @@ mod tests {
     fn batch_matches_sequential() {
         let enc = tiny(&["he", "ll", "hell", "hello"]);
         let texts: Vec<String> = (0..200).map(|i| format!("hello {i} <|end|>")).collect();
-        let batch = enc.encode_ordinary_batch(&texts);
+        let batch = enc.encode_ordinary_batch(&texts).unwrap();
         for (text, tokens) in texts.iter().zip(&batch) {
-            assert_eq!(&enc.encode_ordinary(text), tokens);
+            assert_eq!(&enc.encode_ordinary(text).unwrap(), tokens);
         }
         assert!(
             enc.encode_batch(&texts, SpecialTokens::None, SpecialTokens::All)
@@ -557,6 +578,20 @@ mod tests {
             .encode_batch(&texts, SpecialTokens::All, SpecialTokens::None)
             .unwrap();
         assert!(with_special.iter().all(|t| *t.last().unwrap() == 1000));
+    }
+
+    #[test]
+    fn enormous_whitespace_runs_are_an_error_not_a_panic() {
+        let bytes: Ranks = (0..=255u8).map(|b| (vec![b], Rank::from(b))).collect();
+        let enc = Encoding::new("x", crate::presets::CL100K_BASE_PATTERN, bytes, []).unwrap();
+        let text = format!("abc{}x", " ".repeat(1_100_000));
+        match enc.encode_ordinary(&text) {
+            Err(Error::PreTokenize { offset, .. }) => assert_eq!(offset, 3),
+            other => panic!("expected a pre-tokenization error, got {other:?}"),
+        }
+        // A long run that stays under the limit is fine.
+        let text = format!("abc{}x", " ".repeat(100_000));
+        assert_eq!(enc.encode_ordinary(&text).unwrap().len(), text.len());
     }
 
     #[test]

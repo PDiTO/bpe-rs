@@ -41,7 +41,7 @@ use crate::{Encoding, Error, Rank, Ranks, Result};
 ///
 /// let corpus = ["the cat sat on the mat", "the dog sat on the log"];
 /// let enc = Trainer::new(300).train("demo", &corpus).unwrap();
-/// let tokens = enc.encode_ordinary("the cat sat");
+/// let tokens = enc.encode_ordinary("the cat sat").unwrap();
 /// assert_eq!(enc.decode(&tokens).unwrap(), "the cat sat");
 /// ```
 #[derive(Debug, Clone)]
@@ -101,21 +101,21 @@ impl Trainer {
 
         let piece_counts: FxHashMap<&str, u64> = texts
             .par_iter()
-            .fold(FxHashMap::default, |mut counts, text| {
-                for piece in pieces(&regex, text.as_ref()) {
-                    *counts.entry(piece).or_default() += 1;
+            .try_fold(FxHashMap::default, |mut counts, text| {
+                for piece in pieces(&regex, text.as_ref(), 0) {
+                    *counts.entry(piece?).or_default() += 1;
                 }
-                counts
+                Ok::<_, Error>(counts)
             })
-            .reduce(FxHashMap::default, |mut a, mut b| {
+            .try_reduce(FxHashMap::default, |mut a, mut b| {
                 if a.len() < b.len() {
                     std::mem::swap(&mut a, &mut b);
                 }
                 for (piece, n) in b {
                     *a.entry(piece).or_default() += n;
                 }
-                a
-            });
+                Ok(a)
+            })?;
 
         let words = piece_counts
             .into_iter()
@@ -404,7 +404,7 @@ mod tests {
         assert!(learned <= 320);
         assert_eq!(enc.special_token("<|eot|>"), Some(learned as Rank));
         let text = "fn main() { println!(\"hello 7\"); }\n";
-        let tokens = enc.encode_ordinary(text);
+        let tokens = enc.encode_ordinary(text).unwrap();
         assert_eq!(enc.decode(&tokens).unwrap(), text);
         assert!(tokens.len() * 3 < text.len(), "{} tokens", tokens.len());
     }

@@ -191,7 +191,8 @@ impl PyEncoding {
 
     fn encode_ordinary(&self, py: Python<'_>, text: &Bound<'_, PyString>) -> PyResult<Vec<Rank>> {
         let text = text_of(text)?;
-        Ok(py.detach(|| self.inner.encode_ordinary(&text)))
+        py.detach(|| self.inner.encode_ordinary(&text))
+            .map_err(to_py_err)
     }
 
     #[pyo3(signature = (text, *, allowed_special = None, disallowed_special = None))]
@@ -220,7 +221,8 @@ impl PyEncoding {
         num_threads: Option<usize>,
     ) -> PyResult<Vec<Vec<Rank>>> {
         let texts = texts.iter().map(text_of).collect::<PyResult<Vec<_>>>()?;
-        py.detach(|| run_on(num_threads, || self.inner.encode_ordinary_batch(&texts)))
+        py.detach(|| run_on(num_threads, || self.inner.encode_ordinary_batch(&texts)))?
+            .map_err(to_py_err)
     }
 
     #[pyo3(signature = (texts, *, num_threads = None, allowed_special = None, disallowed_special = None))]
@@ -292,6 +294,7 @@ impl PyEncoding {
         Ok(self
             .inner
             .split(&text)
+            .map_err(to_py_err)?
             .into_iter()
             .map(str::to_owned)
             .collect())

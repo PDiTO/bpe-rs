@@ -70,7 +70,7 @@ fn encode(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(text.len() as u64));
         group.measurement_time(Duration::from_secs(8));
         group.bench_function("split_only", |b| {
-            b.iter(|| enc.split(black_box(&text)).len())
+            b.iter(|| enc.split(black_box(&text)).unwrap().len())
         });
         group.bench_function("encode_ordinary", |b| {
             b.iter(|| enc.encode_ordinary(black_box(&text)))
@@ -78,7 +78,7 @@ fn encode(c: &mut Criterion) {
         group.bench_function("encode_ordinary_batch", |b| {
             b.iter(|| enc.encode_ordinary_batch(black_box(&docs)))
         });
-        let tokens = enc.encode_ordinary(&text);
+        let tokens = enc.encode_ordinary(&text).unwrap();
         group.bench_function("decode_bytes", |b| {
             b.iter(|| enc.decode_bytes(black_box(&tokens)).unwrap())
         });
