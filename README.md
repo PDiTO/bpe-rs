@@ -1,4 +1,7 @@
-<!-- logo -->
+<p align="center">
+  <img src="docs/logo.png" alt="bpe-rs logo" width="260">
+</p>
+
 
 # bpe-rs
 
