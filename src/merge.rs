@@ -258,6 +258,13 @@ mod tests {
     }
 
     #[test]
+    fn readme_worked_example() {
+        // The example walked through in the README.
+        let ranks = byte_vocab(&["ab", "bc", "abc", "cd"]);
+        assert_eq!(both(&ranks, "abcd"), vec![258, Rank::from(b'd')]);
+    }
+
+    #[test]
     fn long_runs_agree() {
         let ranks = byte_vocab(&["aa", "aaaa", "ab", "aab", "ba", "aaaaaaaa"]);
         let piece: String = (0..5000)
