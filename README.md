@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.png" alt="bpe-rs logo" width="260">
+  <img src="docs/logo.png" alt="bpe-rs logo" width="220">
 </p>
 
 
